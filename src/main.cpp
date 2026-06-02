@@ -17,9 +17,16 @@
  *
  */
 #include "main.h"
+#include <sys/time.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+static double wall_time_seconds() {
+	timeval time;
+	gettimeofday(&time,NULL);
+	return time.tv_sec + time.tv_usec*1e-6;
+}
 
 #ifdef _OPENMP
 static void warn_if_over_parallelized(const int num_threads, const int informative_branches) {
@@ -30,7 +37,7 @@ static void warn_if_over_parallelized(const int num_threads, const int informati
 #endif
 
 int main (const int argc, const char* argv[]) {
-	clock_t start_time = clock();
+	double start_time = wall_time_seconds();
 	cout << "ClonalFrameML " << ClonalFrameML_version << endl;
 	if (argc==2 && (strcmp(argv[1],"-version")==0||strcmp(argv[1],"-v")==0)) return 0;
 	// Process the command line arguments	
@@ -455,7 +462,7 @@ int main (const int argc, const char* argv[]) {
 			param[1] = 1.0/initial_values[1];
 			param[2] = initial_values[2];
 			// Do inference
-			clock_t pow_start_time = clock();
+			double pow_start_time = wall_time_seconds();
 			ClonalFrameBaumWelch cff(ctree,node_nuc,isBLC,ipat,kappa,empirical_nucleotide_frequencies,is_imported,prior_a,prior_b,root_node,GUESS_INITIAL_M,SHOW_PROGRESS);
 			#ifdef _OPENMP
 			int n_informative_branches = 0;
@@ -466,7 +473,7 @@ int main (const int argc, const char* argv[]) {
 			#endif
 			param = cff.maximize_likelihood(param);
 			ML = cff.ML;
-			cout << " L = " << ML << " P = " << cff.priorL << " R = " << param[0] << " I = " << param[1] << " D = " << param[2] << " in " << (double)(clock()-pow_start_time)/CLOCKS_PER_SEC << " s and " << cff.neval << " evaluations" << endl;
+			cout << " L = " << ML << " P = " << cff.priorL << " R = " << param[0] << " I = " << param[1] << " D = " << param[2] << " in " << wall_time_seconds()-pow_start_time << " s and " << cff.neval << " evaluations" << endl;
 			cout << " Posterior alphas: R = " << cff.posterior_a[0] << " I = " << cff.posterior_a[1] << " D = " << cff.posterior_a[2] << endl;
 			const double cfmlLLR = ML-cff.priorL-cff.ML0;
 			if(cfmlLLR>6.0) {
@@ -550,7 +557,7 @@ int main (const int argc, const char* argv[]) {
 			param[2] = initial_values[2];
 			param[3] = 1.0e-5;
 			// Do inference
-			clock_t pow_start_time = clock();
+			double pow_start_time = wall_time_seconds();
 			ClonalFrameBaumWelchRhoPerBranch cff(ctree,node_nuc,isBLC,ipat,kappa,empirical_nucleotide_frequencies,is_imported,prior_a,prior_b,root_node,GUESS_INITIAL_M,SHOW_PROGRESS);
 			#ifdef _OPENMP
 			int n_informative_branches = 0;
@@ -562,7 +569,7 @@ int main (const int argc, const char* argv[]) {
 			cff.maximize_likelihood(param);
 			ML = cff.ML;
 			cout << "Mean parameters:" << endl;
-			cout << " L = " << ML << " R = " << cff.mean_param[0] << " I = " << 1.0/cff.mean_param[1] << " D = " << cff.mean_param[2] << " M = " << cff.mean_param[3] << " in " << (double)(clock()-pow_start_time)/CLOCKS_PER_SEC << " s and " << cff.neval << " evaluations" << endl;
+			cout << " L = " << ML << " R = " << cff.mean_param[0] << " I = " << 1.0/cff.mean_param[1] << " D = " << cff.mean_param[2] << " M = " << cff.mean_param[3] << " in " << wall_time_seconds()-pow_start_time << " s and " << cff.neval << " evaluations" << endl;
 			cout << "Parameters per branch:" << endl;
 			for(i=0;i<root_node;i++) {
 				if(cff.informative[i]) {
@@ -621,7 +628,7 @@ int main (const int argc, const char* argv[]) {
 	write_newick(ctree,ctree_node_labels,tree_out_file.c_str());
 	cout << "Wrote processed tree to " << tree_out_file << endl;
 	
-	cout << "All done in " << (double)(clock()-start_time)/CLOCKS_PER_SEC/60.0 << " minutes." << endl;
+	cout << "All done in " << (wall_time_seconds()-start_time)/60.0 << " minutes." << endl;
 	return 0;
 }
 
