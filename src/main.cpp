@@ -1593,6 +1593,7 @@ mydouble maximum_likelihood_ancestral_sequences(Matrix<Nucleotide> &nuc, margina
 	// First, do the tips
 	int i,j,k,l;
 	for(i=0;i<nseq;i++) {
+#pragma omp parallel for schedule(static) private(j,k,l)
 		for(j=0;j<npat;j++) {
 			const Nucleotide obs = nuc[i][pat1[j]];
 			for(k=0;k<4;k++) {
@@ -1622,6 +1623,7 @@ mydouble maximum_likelihood_ancestral_sequences(Matrix<Nucleotide> &nuc, margina
 	}
 	// Now the internal nodes, all of which are bifurcating
 	for(;i<nnodes;i++) {
+#pragma omp parallel for schedule(static) private(j,k,l)
 		for(j=0;j<npat;j++) {
 			const mt_node* d0 = ctree.node[i].descendant[0];
 			const mt_node* d1 = ctree.node[i].descendant[1];
@@ -1690,6 +1692,7 @@ mydouble maximum_likelihood_ancestral_sequences(Matrix<Nucleotide> &nuc, margina
 			errTxt << "maximum_likelihood_ancestral_sequences(): node index during Viterbi-like algorithm second pass";
 			error(errTxt.str().c_str());
 		}
+#pragma omp parallel for schedule(static) private(j,k,l)
 		for(j=0;j<npat;j++) {
 			// Check ancestor path has been computed
 			const int parent_state = node_sequence[ianc][j];
