@@ -1035,6 +1035,7 @@ vector<int> compute_compatibility(DNA &fa, marginal_tree &ctree, vector<bool> &a
 	// Let -2 be a no-call (N)
 	Matrix<int> bip(n,L,-1);
 	int i,pos;
+	#pragma omp parallel for schedule(static) private(i)
 	for(pos=0;pos<L;pos++) {		
 		char* allele0 = NULL;
 		int nallele0 = 0;
@@ -1113,6 +1114,7 @@ vector<int> compute_compatibility(DNA &fa, marginal_tree &ctree, vector<bool> &a
 	// Test whether the observed partitions in the FASTA file are incompatible with any branches in the Newick tree
 	// by tracking whether each of the four possible "haplotypes" has been observed. 
 	// pos is the position in the FASTA file, j is the individual in the FASTA file and k is the branch in the Newick tree
+	#pragma omp parallel for schedule(static) private(j,k)
 	for(pos=0;pos<L;pos++) {
 		// First index is for the branches in the tree. Second and third indices are for the four possible
 		// "haplotypes" (00, 01, 10 and 11).
