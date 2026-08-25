@@ -20,6 +20,7 @@
 #include <sys/time.h>
 #ifdef _OPENMP
 #include <omp.h>
+#include <unordered_map>
 #endif
 
 static double wall_time_seconds() {
@@ -1257,26 +1258,30 @@ void find_alignment_patterns(Matrix<Nucleotide> &nuc, vector<bool> &iscompat, ve
 	ipat = vector<int>(nuc.ncols());
 	static const char AGCTN[5] = {'A','G','C','T','N'};
 	int i,j,pos;
+	// Hash map for O(1) pattern lookup (bit-exact: order/count/index unchanged)
+	unordered_map<string,int> pat_map;
+	pat_map.reserve(nuc.ncols());
 	for(pos=0;pos<nuc.ncols();pos++) {
 		if(iscompat[pos]) {
-			string pospat = "";
+			string pospat;
+			pospat.reserve(nuc.nrows());
 			for(i=0;i<nuc.nrows();i++) {
 				pospat += AGCTN[nuc[i][pos]];
 			}
-			for(j=0;j<pat.size();j++) {
-				if(pospat==pat[j]) break;
-			}
-			if(j==pat.size()) {
+			unordered_map<string,int>::iterator it = pat_map.find(pospat);
+			if(it==pat_map.end()) {
+				j = (int)pat.size();
 				pat.push_back(pospat);
 				pat1.push_back(pos);
 				cpat.push_back(1);
 				ipat[pos] = j;
+				pat_map[pospat] = j;
 			} else {
+				j = it->second;
 				++cpat[j];
 				ipat[pos] = j;
 			}
 		} else {
-			// If not a compatible site
 			ipat[pos] = -1;
 		}
 	}
