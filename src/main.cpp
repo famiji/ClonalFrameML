@@ -1036,7 +1036,7 @@ vector<int> compute_compatibility(DNA &fa, marginal_tree &ctree, vector<bool> &a
 	anyN = vector<bool>(L,false);
 	// Convert FASTA file to binary: if more than two alleles mark as incompatible: -1 (uninitialized), 0 (reference allele), 1 (first non-reference allele), 2 (second non-reference allele)
 	// Let -2 be a no-call (N)
-	Matrix<int> bip(n,L,-1);
+	Matrix<char> bip(n,L,-1);
 	int i,pos;
 	#pragma omp parallel for schedule(static) private(i)
 	for(pos=0;pos<L;pos++) {		
@@ -1091,7 +1091,7 @@ vector<int> compute_compatibility(DNA &fa, marginal_tree &ctree, vector<bool> &a
 		if(allele1!=NULL) delete allele1;
 	}
 	// Create a bip file for the internal branches of the tree, of which there will be n-2
-	Matrix<int> treebip(n,n-2,-1);
+	Matrix<char> treebip(n,n-2,-1);
 	
 	// Add "mutations" encoding the branches of the clonal frame
 	// The first index is for the sequence (including internal sequences) and the second is for the branch encoded (equivalent to the site)
