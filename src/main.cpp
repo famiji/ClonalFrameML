@@ -2386,7 +2386,8 @@ double Baum_Welch(const marginal_tree &tree, const Matrix<Nucleotide> &node_nuc,
 			new_ML_loc=0.0; priorL_loc=0.0;
 			mutI_loc=0.0; numU_loc=0.0; numI_loc=0.0; nsiI_loc=0.0; lenU_loc=0.0; lenI_loc=0.0;
 
-			#pragma omp for schedule(static)
+			// dynamic schedule balances branches with unequal forward-backward cost
+			#pragma omp for schedule(dynamic)
 			for(i=0;i<(int)informative.size();i++) {
 				if(!informative[i]) continue;
 				priorL_loc += gamma_loglikelihood(full_param[3+i], prior_a[3], prior_b[3]);
