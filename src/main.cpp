@@ -1256,31 +1256,98 @@ void find_alignment_patterns(Matrix<Nucleotide> &nuc, vector<bool> &iscompat, ve
 	pat = vector<string>(0);
 	pat1 = vector<int>(0);
 	cpat = vector<int>(0);
-	ipat = vector<int>(nuc.ncols());
+	const int ncol = nuc.ncols();
+	ipat = vector<int>(ncol);
 	static const char AGCTN[5] = {'A','G','C','T','N'};
-	int i,j,pos;
-	// Hash map for O(1) pattern lookup (bit-exact: order/count/index unchanged)
-	unordered_map<string,int> pat_map;
-	pat_map.reserve(nuc.ncols());
-	for(pos=0;pos<nuc.ncols();pos++) {
-		if(iscompat[pos]) {
-			string pospat;
-			pospat.reserve(nuc.nrows());
-			for(i=0;i<nuc.nrows();i++) {
-				pospat += AGCTN[nuc[i][pos]];
+	const int nrows = nuc.nrows();
+	const int nthreads = omp_get_max_threads();
+	// Small inputs fall back to the single-threaded path (bit-exact).
+	if(nthreads<2 || ncol<20000) {
+		unordered_map<string,int> pat_map;
+		pat_map.reserve(ncol);
+		int i,j,pos;
+		for(pos=0;pos<ncol;pos++) {
+			if(iscompat[pos]) {
+				string pospat;
+				pospat.reserve(nrows);
+				for(i=0;i<nrows;i++) {
+					pospat += AGCTN[nuc[i][pos]];
+				}
+				unordered_map<string,int>::iterator it = pat_map.find(pospat);
+				if(it==pat_map.end()) {
+					j = (int)pat.size();
+					pat.push_back(pospat);
+					pat1.push_back(pos);
+					cpat.push_back(1);
+					ipat[pos] = j;
+					pat_map[pospat] = j;
+				} else {
+					j = it->second;
+					++cpat[j];
+					ipat[pos] = j;
+				}
+			} else {
+				ipat[pos] = -1;
 			}
-			unordered_map<string,int>::iterator it = pat_map.find(pospat);
-			if(it==pat_map.end()) {
-				j = (int)pat.size();
-				pat.push_back(pospat);
+		}
+		return;
+	}
+	// Parallel path: explicit static block partition (each pos knows its owner thread),
+	// per-thread local hash tables, then a pos-ordered merge (bit-exact global order).
+	vector< unordered_map<string,int> > lmap(nthreads);
+	vector< vector<string> > lpat(nthreads);
+	vector< vector<int> > lcpat(nthreads);
+	vector<int> lipat(ncol);
+	const int bsize = (ncol + nthreads - 1)/nthreads;
+	#pragma omp parallel
+	{
+		const int t = omp_get_thread_num();
+		const int lo = t*bsize;
+		const int hi = (lo+bsize<ncol) ? lo+bsize : ncol;
+		lmap[t].reserve(bsize);
+		int pos,i,j;
+		for(pos=lo;pos<hi;pos++) {
+			if(iscompat[pos]) {
+				string pospat;
+				pospat.reserve(nrows);
+				for(i=0;i<nrows;i++) {
+					pospat += AGCTN[nuc[i][pos]];
+				}
+				unordered_map<string,int>::iterator it = lmap[t].find(pospat);
+				if(it==lmap[t].end()) {
+					j = (int)lpat[t].size();
+					lpat[t].push_back(pospat);
+					lcpat[t].push_back(1);
+					lipat[pos] = j;
+					lmap[t][pospat] = j;
+				} else {
+					++lcpat[t][it->second];
+					lipat[pos] = it->second;
+				}
+			} else {
+				lipat[pos] = -1;
+			}
+		}
+	}
+	// Merge in pos order (bit-exact: pat order = first occurrence by pos, counts = totals)
+	unordered_map<string,int> gmap;
+	gmap.reserve(ncol);
+	int pos;
+	for(pos=0;pos<ncol;pos++) {
+		if(iscompat[pos]) {
+			const int t = pos/bsize;
+			const string& P = lpat[t][lipat[pos]];
+			unordered_map<string,int>::iterator it = gmap.find(P);
+			if(it==gmap.end()) {
+				const int g = (int)pat.size();
+				pat.push_back(P);
 				pat1.push_back(pos);
 				cpat.push_back(1);
-				ipat[pos] = j;
-				pat_map[pospat] = j;
+				ipat[pos] = g;
+				gmap[P] = g;
 			} else {
-				j = it->second;
-				++cpat[j];
-				ipat[pos] = j;
+				++cpat[it->second];
+				ipat[pos] = it->second;
 			}
 		} else {
 			ipat[pos] = -1;
