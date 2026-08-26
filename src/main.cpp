@@ -21,6 +21,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #include <cstdlib>
+#include <cstdint>
 #include <unordered_map>
 #endif
 
@@ -1252,39 +1253,46 @@ Matrix<Nucleotide> FASTA_to_nucleotide(DNA &fa, vector<double> &empirical_nucleo
 	return nuc;
 }
 
+struct Hash128 {
+	uint64_t a, b;
+	bool operator==(const Hash128 &o) const { return a==o.a && b==o.b; }
+};
+struct Hash128Hasher {
+	size_t operator()(const Hash128 &h) const { return (size_t)(h.a ^ (h.b * 0x9e3779b97f4a7c15ULL)); }
+};
 void find_alignment_patterns(Matrix<Nucleotide> &nuc, vector<bool> &iscompat, vector<string> &pat, vector<int> &pat1, vector<int> &cpat, vector<int> &ipat) {
+	// pat strings are not consumed downstream (maximum_likelihood uses only pat1/cpat),
+	// so dedup by 128-bit hash to bound memory instead of storing full pattern strings.
 	pat = vector<string>(0);
 	pat1 = vector<int>(0);
 	cpat = vector<int>(0);
 	const int ncol = nuc.ncols();
 	ipat = vector<int>(ncol);
-	static const char AGCTN[5] = {'A','G','C','T','N'};
 	const int nrows = nuc.nrows();
 	const int nthreads = omp_get_max_threads();
-	// Small inputs fall back to the single-threaded path (bit-exact).
-	if(nthreads<2 || ncol<20000) {
-		unordered_map<string,int> pat_map;
+	if(nthreads<2 || ncol<1000) {
+		unordered_map<Hash128,int,Hash128Hasher> pat_map;
 		pat_map.reserve(ncol);
-		int i,j,pos;
+		int pos,i;
 		for(pos=0;pos<ncol;pos++) {
 			if(iscompat[pos]) {
-				string pospat;
-				pospat.reserve(nrows);
+				uint64_t a = 1469598103934665603ULL, b = 14695981039346656037ULL;
 				for(i=0;i<nrows;i++) {
-					pospat += AGCTN[nuc[i][pos]];
+					const unsigned char c = (unsigned char)nuc[i][pos];
+					a ^= c; a *= 1099511628211ULL;
+					b ^= c; b *= 1099511628211ULL;
 				}
-				unordered_map<string,int>::iterator it = pat_map.find(pospat);
+				Hash128 h; h.a = a; h.b = b;
+				unordered_map<Hash128,int,Hash128Hasher>::iterator it = pat_map.find(h);
 				if(it==pat_map.end()) {
-					j = (int)pat.size();
-					pat.push_back(pospat);
+					const int j = (int)pat1.size();
 					pat1.push_back(pos);
 					cpat.push_back(1);
 					ipat[pos] = j;
-					pat_map[pospat] = j;
+					pat_map[h] = j;
 				} else {
-					j = it->second;
-					++cpat[j];
-					ipat[pos] = j;
+					++cpat[it->second];
+					ipat[pos] = it->second;
 				}
 			} else {
 				ipat[pos] = -1;
@@ -1292,11 +1300,9 @@ void find_alignment_patterns(Matrix<Nucleotide> &nuc, vector<bool> &iscompat, ve
 		}
 		return;
 	}
-	// Parallel path: explicit static block partition (each pos knows its owner thread),
-	// per-thread local hash tables, then a pos-ordered merge (bit-exact global order).
-	vector< unordered_map<string,int> > lmap(nthreads);
-	vector< vector<string> > lpat(nthreads);
-	vector< vector<int> > lcpat(nthreads);
+	// Parallel: explicit static block partition + per-thread hash tables, then pos-ordered merge.
+	vector<Hash128> harr(ncol);
+	vector< unordered_map<Hash128,int,Hash128Hasher> > lmap(nthreads);
 	vector<int> lipat(ncol);
 	const int bsize = (ncol + nthreads - 1)/nthreads;
 	#pragma omp parallel
@@ -1305,23 +1311,22 @@ void find_alignment_patterns(Matrix<Nucleotide> &nuc, vector<bool> &iscompat, ve
 		const int lo = t*bsize;
 		const int hi = (lo+bsize<ncol) ? lo+bsize : ncol;
 		lmap[t].reserve(bsize);
-		int pos,i,j;
+		int pos,i;
 		for(pos=lo;pos<hi;pos++) {
 			if(iscompat[pos]) {
-				string pospat;
-				pospat.reserve(nrows);
+				uint64_t a = 1469598103934665603ULL, b = 14695981039346656037ULL;
 				for(i=0;i<nrows;i++) {
-					pospat += AGCTN[nuc[i][pos]];
+					const unsigned char c = (unsigned char)nuc[i][pos];
+					a ^= c; a *= 1099511628211ULL;
+					b ^= c; b *= 1099511628211ULL;
 				}
-				unordered_map<string,int>::iterator it = lmap[t].find(pospat);
+				Hash128 h; h.a = a; h.b = b;
+				harr[pos] = h;
+				unordered_map<Hash128,int,Hash128Hasher>::iterator it = lmap[t].find(h);
 				if(it==lmap[t].end()) {
-					j = (int)lpat[t].size();
-					lpat[t].push_back(pospat);
-					lcpat[t].push_back(1);
-					lipat[pos] = j;
-					lmap[t][pospat] = j;
+					lipat[pos] = (int)lmap[t].size();
+					lmap[t][h] = lipat[pos];
 				} else {
-					++lcpat[t][it->second];
 					lipat[pos] = it->second;
 				}
 			} else {
@@ -1329,22 +1334,20 @@ void find_alignment_patterns(Matrix<Nucleotide> &nuc, vector<bool> &iscompat, ve
 			}
 		}
 	}
-	// Merge in pos order (bit-exact: pat order = first occurrence by pos, counts = totals)
-	unordered_map<string,int> gmap;
+	// Merge in pos order (bit-exact: pat1 = first occurrence by pos, cpat = totals)
+	unordered_map<Hash128,int,Hash128Hasher> gmap;
 	gmap.reserve(ncol);
 	int pos;
 	for(pos=0;pos<ncol;pos++) {
 		if(iscompat[pos]) {
-			const int t = pos/bsize;
-			const string& P = lpat[t][lipat[pos]];
-			unordered_map<string,int>::iterator it = gmap.find(P);
+			const Hash128 h = harr[pos];
+			unordered_map<Hash128,int,Hash128Hasher>::iterator it = gmap.find(h);
 			if(it==gmap.end()) {
-				const int g = (int)pat.size();
-				pat.push_back(P);
+				const int g = (int)pat1.size();
 				pat1.push_back(pos);
 				cpat.push_back(1);
 				ipat[pos] = g;
-				gmap[P] = g;
+				gmap[h] = g;
 			} else {
 				++cpat[it->second];
 				ipat[pos] = it->second;
@@ -1353,8 +1356,8 @@ void find_alignment_patterns(Matrix<Nucleotide> &nuc, vector<bool> &iscompat, ve
 			ipat[pos] = -1;
 		}
 	}
+	cout << "find_alignment_patterns: npat=" << pat1.size() << " from " << ncol << " sites" << endl;
 }
-
 /* Use the following in Maple to generate this code (k is 1/transition:transversion ratio, i.e. k=1/kappa)
  
  M := Matrix([
