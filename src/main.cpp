@@ -20,6 +20,7 @@
 #include <sys/time.h>
 #ifdef _OPENMP
 #include <omp.h>
+#include <cstdlib>
 #include <unordered_map>
 #endif
 
@@ -1580,59 +1581,55 @@ double HKY85_expected_rate(const vector<double> &n, const double kappa, const ve
  Tal Pupko, Itsik Peer, Ron Shamir, and Dan Graur. Mol. Biol. Evol. 17(6):890–896. 2000
  */
 mydouble maximum_likelihood_ancestral_sequences(Matrix<Nucleotide> &nuc, marginal_tree &ctree, const double kappa, const vector<double> &pi, vector<int> &pat1, vector<int> &cpat, Matrix<Nucleotide> &node_sequence) {
-	mydouble ML(1.0);
-	// Every node in the tree has a likelihood attached of the best subtree likelihood, and the sequence eventually identified as the global maximum likelihood estimate
+	// Process patterns in chunks to bound subtree_ML/path_ML memory on huge datasets.
+	// Patterns are independent (per-j), so chunking is bit-exact: each j is computed in the same order as before.
+	int chunk_size = 100000;
+	if(getenv("CFML_CHUNK")) chunk_size = atoi(getenv("CFML_CHUNK"));
+	if(chunk_size < 1) chunk_size = 1;
 	const int nseq = nuc.nrows();
 	const int nnodes = 2*nseq-1;
 	const int npat = pat1.size();
 	node_sequence = Matrix<Nucleotide>(nnodes,npat,N_ambiguous);
-	// subtree_ML[i][j][k] is, for node i, pattern j, the subtree maximum likelihood given the parent node has state k = {A,G,C,T}
-	Matrix<mydouble> subtree_ML_element(npat,4,0.0);
-	vector< Matrix<mydouble> > subtree_ML(nnodes,subtree_ML_element);
-	// path_ML[i][j][k] is, for node i, pattern j, the state of node i that maximizes the subtree likelihood given the parent node has state k = {A,G,C,T}
-	Matrix<Nucleotide> path_ML_element(npat,4,N_ambiguous);
-	vector< Matrix<Nucleotide> > path_ML(nnodes,path_ML_element);
-	// For each node (except the root node), define an HKY85 transition probability matrix
 	vector< Matrix<double> > ptrans = compute_HKY85_ptrans(ctree,kappa,pi);
-	// Nodes are ordered in the tree first in tip order (0..n-1) then in ascending time order towards the root node (2*n-2)
-	// First, do the tips
-	int i,j,k,l;
-	for(i=0;i<nseq;i++) {
+	mydouble ML(1.0);
+	int j0;
+	for(j0=0;j0<npat;j0+=chunk_size) {
+		const int j1 = (j0+chunk_size<npat) ? j0+chunk_size : npat;
+		const int nchunk = j1-j0;
+		Matrix<mydouble> subtree_ML_element(nchunk,4,0.0);
+		vector< Matrix<mydouble> > subtree_ML(nnodes,subtree_ML_element);
+		Matrix<Nucleotide> path_ML_element(nchunk,4,N_ambiguous);
+		vector< Matrix<Nucleotide> > path_ML(nnodes,path_ML_element);
+		int i,j,k,l;
+		for(i=0;i<nseq;i++) {
 #pragma omp parallel for schedule(static) private(j,k,l)
-		for(j=0;j<npat;j++) {
-			const Nucleotide obs = nuc[i][pat1[j]];
-			for(k=0;k<4;k++) {
-				// If the parent node's state is k, what is the maximum likelihood of the subtree?
-				// And what is the state of the node that achieves that maximum value?
-				if(obs==Adenine || obs==Guanine || obs==Cytosine || obs==Thymine) {
-					subtree_ML[i][j][k] = ptrans[i][k][obs];
-					path_ML[i][j][k] = obs;
-				} else if(obs==N_ambiguous) {
-					// If multiple equally good paths are possible, the path is chosen in the following order of decreasing preference: A, G, C, T
-					subtree_ML[i][j][k] = ptrans[i][k][0];
-					path_ML[i][j][k] = (Nucleotide)0;
-					for(l=1;l<4;l++) {
-						double subtree_ML_l = ptrans[i][k][l];
-						if(subtree_ML_l>subtree_ML[i][j][k]) {
-							subtree_ML[i][j][k] = subtree_ML_l;
-							path_ML[i][j][k] = (Nucleotide)l;
+			for(j=0;j<nchunk;j++) {
+				const Nucleotide obs = nuc[i][pat1[j0+j]];
+				for(k=0;k<4;k++) {
+					if(obs==Adenine || obs==Guanine || obs==Cytosine || obs==Thymine) {
+						subtree_ML[i][j][k] = ptrans[i][k][obs];
+						path_ML[i][j][k] = obs;
+					} else if(obs==N_ambiguous) {
+						subtree_ML[i][j][k] = ptrans[i][k][0];
+						path_ML[i][j][k] = (Nucleotide)0;
+						for(l=1;l<4;l++) {
+							double subtree_ML_l = ptrans[i][k][l];
+							if(subtree_ML_l>subtree_ML[i][j][k]) {
+								subtree_ML[i][j][k] = subtree_ML_l;
+								path_ML[i][j][k] = (Nucleotide)l;
+							}
 						}
+					} else {
+						stringstream errTxt;
+						errTxt << "maximum_likelihood_ancestral_sequences(): unexpected base " << obs << " (out of range 0-5) in sequence " << i << " pattern " << j0+j;
+						error(errTxt.str().c_str());
 					}
-				} else {
-					stringstream errTxt;
-					errTxt << "maximum_likelihood_ancestral_sequences(): unexpected base " << obs << " (out of range 0-5) in sequence " << i << " pattern " << j;
-					error(errTxt.str().c_str());
 				}
 			}
 		}
-	}
-	// Now the internal nodes, all of which are bifurcating
-	for(;i<nnodes;i++) {
-#pragma omp parallel for schedule(static) private(j,k,l)
-		for(j=0;j<npat;j++) {
+		for(i=nseq;i<nnodes;i++) {
 			const mt_node* d0 = ctree.node[i].descendant[0];
 			const mt_node* d1 = ctree.node[i].descendant[1];
-			// Check the descendant nodes exist
 			if(d0==NULL || d1==NULL) {
 				stringstream errTxt;
 				errTxt << "maximum_likelihood_ancestral_sequences(): null pointer during Viterbi-like algorithm";
@@ -1645,75 +1642,67 @@ mydouble maximum_likelihood_ancestral_sequences(Matrix<Nucleotide> &nuc, margina
 				errTxt << "maximum_likelihood_ancestral_sequences(): node index during Viterbi-like algorithm";
 				error(errTxt.str().c_str());
 			}
-			// Check subtree ML has been computed
-			for(l=0;l<4;l++) {
-				if(subtree_ML[i0][j][l].iszero() || subtree_ML[i1][j][l].iszero()) {
-					stringstream errTxt;
-					errTxt << "maximum_likelihood_ancestral_sequences(): uninitialized subtree ML during Viterbi-like algorithm";
-					error(errTxt.str().c_str());
+#pragma omp parallel for schedule(static) private(j,k,l)
+			for(j=0;j<nchunk;j++) {
+				for(l=0;l<4;l++) {
+					if(subtree_ML[i0][j][l].iszero() || subtree_ML[i1][j][l].iszero()) {
+						stringstream errTxt;
+						errTxt << "maximum_likelihood_ancestral_sequences(): uninitialized subtree ML during Viterbi-like algorithm";
+						error(errTxt.str().c_str());
+					}
 				}
-			}
-			for(k=0;k<4;k++) {
-				// If the parent node's state is k, what is the maximum likelihood of the subtree?
-				// And what is the state of the node that achieves that maximum value?
-				// If multiple equally good paths are possible, the path is chosen in the following order of decreasing preference: A, G, C, T
-				subtree_ML[i][j][k] = ptrans[i][k][0]*subtree_ML[i0][j][0]*subtree_ML[i1][j][0];
-				path_ML[i][j][k] = (Nucleotide)0;
-				for(l=1;l<4;l++) {
-					const mydouble subtree_ML_l = ptrans[i][k][l]*subtree_ML[i0][j][l]*subtree_ML[i1][j][l];
-					if(subtree_ML_l > subtree_ML[i][j][k]) {
-						subtree_ML[i][j][k] = subtree_ML_l;
-						path_ML[i][j][k] = (Nucleotide)l;
+				for(k=0;k<4;k++) {
+					subtree_ML[i][j][k] = ptrans[i][k][0]*subtree_ML[i0][j][0]*subtree_ML[i1][j][0];
+					path_ML[i][j][k] = (Nucleotide)0;
+					for(l=1;l<4;l++) {
+						const mydouble subtree_ML_l = ptrans[i][k][l]*subtree_ML[i0][j][l]*subtree_ML[i1][j][l];
+						if(subtree_ML_l > subtree_ML[i][j][k]) {
+							subtree_ML[i][j][k] = subtree_ML_l;
+							path_ML[i][j][k] = (Nucleotide)l;
+						}
 					}
 				}
 			}
 		}
-	}
-	// Now work back from root to tips choosing the ML path
-	// Start at the root (this is redundant as the root's ancestor has no bearing so subtree_ML[nnodes-1][j][l] and path_ML[nnodes-1][j][l] are the same for different l's)
-	for(j=0;j<npat;j++) {
-		int best_state = 0;
-		mydouble ML_temp = subtree_ML[nnodes-1][j][0];
-		for(l=1;l<4;l++) {
-			if(subtree_ML[nnodes-1][j][l]>ML) {
-				best_state = l;
-				ML_temp = subtree_ML[nnodes-1][j][l];
+		for(j=0;j<nchunk;j++) {
+			int best_state = 0;
+			mydouble ML_temp = subtree_ML[nnodes-1][j][0];
+			for(l=1;l<4;l++) {
+				if(subtree_ML[nnodes-1][j][l]>ML) {
+					best_state = l;
+					ML_temp = subtree_ML[nnodes-1][j][l];
+				}
 			}
+			node_sequence[nnodes-1][j0+j] = path_ML[nnodes-1][j][best_state];
+			ML *= pow(ML_temp,cpat[j0+j]);
 		}
-		node_sequence[nnodes-1][j] = path_ML[nnodes-1][j][best_state];
-		ML *= pow(ML_temp,cpat[j]);
-	}
-	for(i=nnodes-2;i>=0;i--) {
-		const mt_node* anc = ctree.node[i].ancestor;
-		// Check the descendant nodes exist
-		if(anc==NULL) {
-			stringstream errTxt;
-			errTxt << "maximum_likelihood_ancestral_sequences(): null pointer during Viterbi-like algorithm second pass";
-			error(errTxt.str().c_str());
-		}
-		const int ianc = anc->id;
-		if(ianc<0 || ianc>=nnodes) {
-			stringstream errTxt;
-			errTxt << "maximum_likelihood_ancestral_sequences(): node index during Viterbi-like algorithm second pass";
-			error(errTxt.str().c_str());
-		}
-#pragma omp parallel for schedule(static) private(j,k,l)
-		for(j=0;j<npat;j++) {
-			// Check ancestor path has been computed
-			const int parent_state = node_sequence[ianc][j];
-			if(parent_state==N_ambiguous) {
+		for(i=nnodes-2;i>=0;i--) {
+			const mt_node* anc = ctree.node[i].ancestor;
+			if(anc==NULL) {
 				stringstream errTxt;
-				errTxt << "maximum_likelihood_ancestral_sequences(): uninitialized ML ancestor during Viterbi-like algorithm second pass";
+				errTxt << "maximum_likelihood_ancestral_sequences(): null pointer during Viterbi-like algorithm second pass";
 				error(errTxt.str().c_str());
 			}
-			node_sequence[i][j] = path_ML[i][j][parent_state];
+			const int ianc = anc->id;
+			if(ianc<0 || ianc>=nnodes) {
+				stringstream errTxt;
+				errTxt << "maximum_likelihood_ancestral_sequences(): node index during Viterbi-like algorithm second pass";
+				error(errTxt.str().c_str());
+			}
+#pragma omp parallel for schedule(static) private(j)
+			for(j=0;j<nchunk;j++) {
+				const int parent_state = node_sequence[ianc][j0+j];
+				if(parent_state==N_ambiguous) {
+					stringstream errTxt;
+					errTxt << "maximum_likelihood_ancestral_sequences(): uninitialized ML ancestor during Viterbi-like algorithm second pass";
+					error(errTxt.str().c_str());
+				}
+				node_sequence[i][j0+j] = path_ML[i][j][parent_state];
+			}
 		}
 	}
-	
-	// At the end, convert patterns to sites working from the end of the sequence forwards
 	return ML;
 }
-
 void write_newick(const marginal_tree &ctree, const vector<string> &all_node_names, const char* file_name) {
 	ofstream fout(file_name);
 	if(!fout) {
