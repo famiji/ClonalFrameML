@@ -378,6 +378,9 @@ int main (const int argc, const char* argv[]) {
 		// Convert FASTA file to internal representation of nucleotides for Branch Length Correction
 		vector<double> empirical_nucleotide_frequencies(4,0.25);
 		Matrix<Nucleotide> nuc = FASTA_to_nucleotide(fa,empirical_nucleotide_frequencies,isBLC);
+		// fa is not used beyond this point unless a filtered alignment is requested;
+		// release its memory before the memory-intensive branch length correction
+		if(!OUTPUT_FILTERED) fa = DNA();
 		// Identify and count unique patterns
 		vector<string> pat;				// Pattern as string of AGCTNs
 		vector<int> pat1, cpat, ipat;	// First example of each pattern, number of sites with that pattern, the pattern at each (compatible) site (-1 otherwise)
@@ -1039,29 +1042,29 @@ vector<int> compute_compatibility(DNA &fa, marginal_tree &ctree, vector<bool> &a
 	Matrix<char> bip(n,L,-1);
 	int i,pos;
 	#pragma omp parallel for schedule(static) private(i)
-	for(pos=0;pos<L;pos++) {		
-		char* allele0 = NULL;
+	for(pos=0;pos<L;pos++) {
+		char allele0 = 0;	// 0 means unset (observed bases are never NUL)
 		int nallele0 = 0;
-		char* allele1 = NULL;
+		char allele1 = 0;
 		int nallele1 = 0;
 		for(i=0;i<n;i++) {
 			if(fa[i][pos]!='N' && fa[i][pos]!='-' && fa[i][pos]!='X' && fa[i][pos]!='?') {
 				// If not an N
-				if(allele0==NULL) {
-					allele0 = new char(fa[i][pos]);
+				if(nallele0==0) {
+					allele0 = fa[i][pos];
 					bip[i][pos] = 0;
-					++nallele0;
+					nallele0 = 1;
 				} else {
-					if(fa[i][pos]==*allele0) {
+					if(fa[i][pos]==allele0) {
 						bip[i][pos] = 0;
 						++nallele0;
 					} else {
-						if(allele1==NULL) {
-							allele1 = new char(fa[i][pos]);
+						if(nallele1==0) {
+							allele1 = fa[i][pos];
 							bip[i][pos] = 1;
-							++nallele1;
+							nallele1 = 1;
 						} else {
-							if(fa[i][pos]==*allele1) {
+							if(fa[i][pos]==allele1) {
 								bip[i][pos] = 1;
 								++nallele1;
 							} else {
@@ -1079,7 +1082,7 @@ vector<int> compute_compatibility(DNA &fa, marginal_tree &ctree, vector<bool> &a
 			}
 		}
 		if(iscompat[pos]==0) {
-			if(allele0==NULL || allele1==NULL) {
+			if(nallele0==0 || nallele1==0) {
 				// Invariant site (or all Ns): must be compatible
 				iscompat[pos] = -1;
 			} else if(nallele0==1 || nallele1==1) {
@@ -1087,65 +1090,49 @@ vector<int> compute_compatibility(DNA &fa, marginal_tree &ctree, vector<bool> &a
 				iscompat[pos] = (purge_singletons) ? -1 : -2;
 			}
 		}
-		if(allele0!=NULL) delete allele0;
-		if(allele1!=NULL) delete allele1;
 	}
-	// Create a bip file for the internal branches of the tree, of which there will be n-2
-	Matrix<char> treebip(n,n-2,-1);
-	
-	// Add "mutations" encoding the branches of the clonal frame
-	// The first index is for the sequence (including internal sequences) and the second is for the branch encoded (equivalent to the site)
-	Matrix<int> cstate(2*n-1,2*n-1,-1);
+	// Determine compatibility with the clonal frame by the four-gamete test.
+	// For branch k let c0(k)/c1(k) be the number of tips in its clade carrying allele 0/1,
+	// and T0/T1 the totals over all tips. The site is incompatible iff for some branch both
+	// alleles occur inside and both occur outside its clade:
+	//     c0(k)>0 && c1(k)>0 && T0-c0(k)>0 && T1-c1(k)>0
+	// This is mathematically identical to the previous O(n^2) formulation that tracked the four
+	// haplotypes hap[k][0][0] && hap[k][0][1] && hap[k][1][0] && hap[k][1][1] per branch, because
+	// hap[k][a][1] was set iff some tip in the clade of k carried allele a and hap[k][a][0] iff
+	// some tip outside the clade carried allele a. Tip branches can never trigger (a single tip
+	// cannot carry both alleles) and the root can never trigger (no tip lies outside its clade),
+	// exactly as before, but the cost is O(n) per site with no per-site allocation and no cstate table.
 	int j,k;
-	// Assign 0 to the root node for every site
-	for(k=0;k<2*n-1;k++) cstate[2*n-2][k] = 0;
-	// Work from root to tips inheriting the state or, if the focal branch, introducing the mutated state
-	for(j=2*n-3;j>=0;j--) {
-		for(k=0;k<2*n-1;k++) {
-			if(j==k) {
-				cstate[j][k] = 1;
-			} else {
-				const mt_node *node = &(ctree.node[j]);
-				const mt_node *parent = node->ancestor;
-				const int parentState = cstate[parent->id][k];
-				cstate[j][k] = parentState;
-			}
-		}
-	}
-	
-	// Determine compatibility with the clonal frame
-	// Test whether the observed partitions in the FASTA file are incompatible with any branches in the Newick tree
-	// by tracking whether each of the four possible "haplotypes" has been observed. 
-	// pos is the position in the FASTA file, j is the individual in the FASTA file and k is the branch in the Newick tree
-	#pragma omp parallel for schedule(static) private(j,k)
-	for(pos=0;pos<L;pos++) {
-		// First index is for the branches in the tree. Second and third indices are for the four possible
-		// "haplotypes" (00, 01, 10 and 11).
-		vector< Matrix<bool> > hap(2*n-1, Matrix<bool>(2,2,false));
-		if(iscompat[pos]==0) {
-			for(j=0;j<n;j++) {
-				const int jallele = bip[j][pos];
-				if(jallele!=-2) {
-					for(k=0;k<2*n-1;k++) {
-						const int kallele = cstate[j][k];
-						if(kallele!=-2) {
-							hap[k][jallele][kallele] = true;
-						}
+	#pragma omp parallel
+	{
+		vector<int> c0(2*n-1), c1(2*n-1);
+		#pragma omp for schedule(static) private(j,k)
+		for(pos=0;pos<L;pos++) {
+			if(iscompat[pos]==0) {
+				int T0 = 0, T1 = 0;
+				for(j=0;j<n;j++) {
+					const char jallele = bip[j][pos];
+					c0[j] = (jallele==0);
+					c1[j] = (jallele==1);
+					T0 += c0[j];
+					T1 += c1[j];
+				}
+				for(j=n;j<2*n-1;j++) {
+					const mt_node *node = &(ctree.node[j]);
+					const int d0 = node->descendant[0]->id;
+					const int d1 = node->descendant[1]->id;
+					c0[j] = c0[d0]+c0[d1];
+					c1[j] = c1[d0]+c1[d1];
+				}
+				for(k=0;k<2*n-2;k++) {
+					if(c0[k]>0 && c1[k]>0 && T0>c0[k] && T1>c1[k]) {
+						iscompat[pos] = 1;
+						break;
 					}
 				}
+			} else if(iscompat[pos]==-2) {
+				iscompat[pos] = 0;
 			}
-			bool allcompat = true;
-			for(k=0;k<2*n-1;k++) {
-				if(hap[k][0][0] && hap[k][0][1] && hap[k][1][0] && hap[k][1][1]) {
-					allcompat = false;
-					break;
-				}
-			}
-			if(!allcompat) {
-				iscompat[pos] = 1;
-			}
-		} else if(iscompat[pos]==-2) {
-			iscompat[pos] = 0;
 		}
 	}
 	
@@ -1662,14 +1649,19 @@ mydouble maximum_likelihood_ancestral_sequences(Matrix<Nucleotide> &nuc, margina
 	node_sequence = Matrix<Nucleotide>(nnodes,npat,N_ambiguous);
 	vector< Matrix<double> > ptrans = compute_HKY85_ptrans(ctree,kappa,pi);
 	mydouble ML(1.0);
+	// Allocate the per-chunk workspaces once at the maximum chunk size. Every element of
+	// subtree_ML/path_ML is rewritten before it is read within each chunk (tips first, then
+	// internal nodes in ascending id order, then the root and the traceback pass), so no
+	// per-chunk reinitialization is required and results are identical.
+	const int max_chunk = (chunk_size<npat) ? chunk_size : npat;
+	Matrix<mydouble> subtree_ML_element(max_chunk,4,0.0);
+	vector< Matrix<mydouble> > subtree_ML(nnodes,subtree_ML_element);
+	Matrix<Nucleotide> path_ML_element(max_chunk,4,N_ambiguous);
+	vector< Matrix<Nucleotide> > path_ML(nnodes,path_ML_element);
 	int j0;
 	for(j0=0;j0<npat;j0+=chunk_size) {
 		const int j1 = (j0+chunk_size<npat) ? j0+chunk_size : npat;
 		const int nchunk = j1-j0;
-		Matrix<mydouble> subtree_ML_element(nchunk,4,0.0);
-		vector< Matrix<mydouble> > subtree_ML(nnodes,subtree_ML_element);
-		Matrix<Nucleotide> path_ML_element(nchunk,4,N_ambiguous);
-		vector< Matrix<Nucleotide> > path_ML(nnodes,path_ML_element);
 		int i,j,k,l;
 		for(i=0;i<nseq;i++) {
 #pragma omp parallel for schedule(static) private(j,k,l)
@@ -2129,6 +2121,12 @@ mydouble mydouble_forward_backward_expectations_ClonalFrame_branch(const int dec
 			eI[anc*4+dec] = pemisImported[anc][dec];
 		}
 	}
+	// Cache the transition probabilities for the last seen inter-site distance: they depend
+	// only on totrecrate and the distance, which is typically constant, so this avoids
+	// recomputing identical transcendentals at every site. Cached values are identical to
+	// recomputation because they are deterministic functions of the same inputs.
+	double cached_d = -1.0;
+	mydouble cached_prnotrans(1.0), cached_prtrans(1.0);
 	for(i=0;i<npos;i++) {
 		const int code = obs[i];
 		if(i==0) {
@@ -2138,11 +2136,14 @@ mydouble mydouble_forward_backward_expectations_ClonalFrame_branch(const int dec
 			aprev[0] = a[0];
 			aprev[1] = a[1];
 			const mydouble sumaprev = aprev[0]+aprev[1];
-			mydouble prnotrans;
-			prnotrans.setlog(-totrecrate*(position[i]-position[i-1]));
-			const mydouble prtrans = mydouble(1.0)-prnotrans;
-			a[0] = (aprev[0]*prnotrans+sumaprev*piU*prtrans)*eU[code];
-			a[1] = (aprev[1]*prnotrans+sumaprev*piI*prtrans)*eI[code];
+			const double d = position[i]-position[i-1];
+			if(d!=cached_d) {
+				cached_prnotrans.setlog(-totrecrate*d);
+				cached_prtrans = mydouble(1.0)-cached_prnotrans;
+				cached_d = d;
+			}
+			a[0] = (aprev[0]*cached_prnotrans+sumaprev*piU*cached_prtrans)*eU[code];
+			a[1] = (aprev[1]*cached_prnotrans+sumaprev*piI*cached_prtrans)*eI[code];
 		}
 		// Store for the second pass
 		A[i][0] = a[0];
@@ -2166,15 +2167,17 @@ mydouble mydouble_forward_backward_expectations_ClonalFrame_branch(const int dec
 			const int code1 = obs[i+1];
 			const mydouble pemisU = eU[code1];
 			const mydouble pemisI = eI[code1];
-			mydouble prnotrans;
-			prnotrans.setlog(-totrecrate*(position[i+1]-position[i]));
-			const mydouble prtrans = mydouble(1.0)-prnotrans;
-			const mydouble sumbnext = prtrans*(piU*pemisU*bnext[0] + piI*pemisI*bnext[1]);
-			b[0] = prnotrans*pemisU*bnext[0]+sumbnext;
-			b[1] = prnotrans*pemisI*bnext[1]+sumbnext;
+			const double d = position[i+1]-position[i];
+			if(d!=cached_d) {
+				cached_prnotrans.setlog(-totrecrate*d);
+				cached_prtrans = mydouble(1.0)-cached_prnotrans;
+				cached_d = d;
+			}
+			const mydouble sumbnext = cached_prtrans*(piU*pemisU*bnext[0] + piI*pemisI*bnext[1]);
+			b[0] = cached_prnotrans*pemisU*bnext[0]+sumbnext;
+			b[1] = cached_prnotrans*pemisI*bnext[1]+sumbnext;
 
 			// Store transition expectations for parallel reduction
-			const double d = position[i+1]-position[i];
 			if(d<=1000.) {
 				const mydouble pemis[2]  = {pemisU,pemisI};
 				mydouble pU_i = A[i][0]*b[0];
@@ -2186,9 +2189,9 @@ mydouble mydouble_forward_backward_expectations_ClonalFrame_branch(const int dec
 						const int istrans = (int)(j!=k);
 						mydouble joint;
 						if(istrans) {
-							joint = A[i][j]*prtrans*((k==0)?piU:piI)*pemis[k]*bnext[k];
+							joint = A[i][j]*cached_prtrans*((k==0)?piU:piI)*pemis[k]*bnext[k];
 						} else {
-							joint = A[i][j]*(prnotrans+prtrans*((k==0)?piU:piI))*pemis[k]*bnext[k];
+							joint = A[i][j]*(cached_prnotrans+cached_prtrans*((k==0)?piU:piI))*pemis[k]*bnext[k];
 						}
 						xi[(size_t)i*4+(size_t)(j*2+k)] = (joint/MLi).todouble();
 					}

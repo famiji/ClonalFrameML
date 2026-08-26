@@ -46,8 +46,8 @@ using myutils::DATA_TYPE;
 // Global definition of random number generator
 Random ran;
 
-enum Nucleotide {Adenine=0, Guanine, Cytosine, Thymine, N_ambiguous};
-enum ImportationState {Unimported=0, Imported};
+enum Nucleotide : char {Adenine=0, Guanine, Cytosine, Thymine, N_ambiguous};
+enum ImportationState : char {Unimported=0, Imported};
 
 marginal_tree convert_rooted_NewickTree_to_marginal_tree(NewickTree &newick, vector<string> &tip_labels, vector<string> &all_node_labels);
 marginal_tree convert_unrooted_NewickTree_to_marginal_tree(NewickTree &newick, vector<string> &tip_labels, vector<string> &all_node_labels);
@@ -195,6 +195,8 @@ public:
 			}
 		}
 		int j,k;
+		// Branches are independent: each writes only initial_branch_length[i] and informative[i]
+		#pragma omp parallel for schedule(static) private(i,j,k)
 		for(i=0;i<root_node;i++) {
 			// Crudely re-estimate branch length: use this as the mean of the prior on branch length ????
 			double pd = 1.0, pd_den = 2.0;
@@ -244,6 +246,8 @@ public:
 		// Iterate
 		ML = Baum_Welch(tree,node_nuc,which_compat,ipat,kappa,pi,informative,prior_a,prior_b,full_param,posterior_a,neval,coutput,priorL);
 		// Update importation status for all branches **for ALL SITES**, including uninformative ones
+		// Branches are independent: each writes only is_imported[i]
+		#pragma omp parallel for schedule(static) private(i)
 		for(i=0;i<initial_branch_length.size();i++) {
 			const int dec_id = tree.node[i].id;
 			const int anc_id = tree.node[i].ancestor->id;
