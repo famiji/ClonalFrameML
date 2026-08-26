@@ -375,6 +375,10 @@ int main (const int argc, const char* argv[]) {
 	
 	// BRANCH LENGTH CORRECTION
 	if(CORRECT_BRANCH_LENGTHS) {
+		// Release the IRAS-stage alignment and ancestral sequences (shadowed by
+		// the BLC copies below) before the memory-intensive branch length correction
+		nuc = Matrix<Nucleotide>(0,0);
+		node_nuc = Matrix<Nucleotide>(0,0);
 		// Convert FASTA file to internal representation of nucleotides for Branch Length Correction
 		vector<double> empirical_nucleotide_frequencies(4,0.25);
 		Matrix<Nucleotide> nuc = FASTA_to_nucleotide(fa,empirical_nucleotide_frequencies,isBLC);
@@ -1321,6 +1325,9 @@ void find_alignment_patterns(Matrix<Nucleotide> &nuc, vector<bool> &iscompat, ve
 			}
 		}
 	}
+	// lipat is only consumed in the parallel phase; release before the pos-ordered merge
+	lipat.clear();
+	lipat.shrink_to_fit();
 	// Merge in pos order (bit-exact: pat1 = first occurrence by pos, cpat = totals)
 	unordered_map<Hash128,int,Hash128Hasher> gmap;
 	gmap.reserve(ncol);
@@ -1988,10 +1995,9 @@ mydouble maximum_likelihood_ClonalFrame_branch_allsites(const int dec_id, const 
 	mydouble ML(0.0);
 	// Store the positions of **all** sites
 	is_imported = vector<ImportationState>(iscompat.size(),Unimported);
-	// subseq_ML[i][j] is, for position i, the subsequence maximum likelihood given the next position has state j = {Unimported,Imported}
-	Matrix<mydouble> subseq_ML(iscompat.size(),2);
-	// path_ML[i][j] is, for position i, the state of position i that maximizes the subsequence likelihood given the next position has state j = {Unimported,Imported}
-	Matrix<ImportationState> path_ML(iscompat.size(),2);
+	// Flattened 2-column workspaces (state index 0/1) for contiguous access
+	vector<mydouble> subseq_ML(2*iscompat.size());
+	vector<ImportationState> path_ML(2*iscompat.size(),Unimported);
 	// Define an HKY85 emission probability matrix for Unimported sites
 	Matrix<mydouble> pemisUnimported;
 	pemisUnimported = compute_HKY85_ptrans(branch_length,kappa,pinuc);
@@ -2033,10 +2039,10 @@ mydouble maximum_likelihood_ClonalFrame_branch_allsites(const int dec_id, const 
 			Nucleotide dec = node_nuc[dec_id][ipat[j]];
 			Nucleotide anc = node_nuc[anc_id][ipat[j]];
 			if(i<iscompat.size()-1) {
-				UU = ptrans[0][0]*pemisUnimported[anc][dec]*subseq_ML[i+1][0];
-				UI = ptrans[0][1]*  pemisImported[anc][dec]*subseq_ML[i+1][1];
-				IU = ptrans[1][0]*pemisUnimported[anc][dec]*subseq_ML[i+1][0];
-				II = ptrans[1][1]*  pemisImported[anc][dec]*subseq_ML[i+1][1];
+				UU = ptrans[0][0]*pemisUnimported[anc][dec]*subseq_ML[2*(i+1)];
+				UI = ptrans[0][1]*  pemisImported[anc][dec]*subseq_ML[2*(i+1)+1];
+				IU = ptrans[1][0]*pemisUnimported[anc][dec]*subseq_ML[2*(i+1)];
+				II = ptrans[1][1]*  pemisImported[anc][dec]*subseq_ML[2*(i+1)+1];
 			} else {
 				UU = ptrans[0][0]*pemisUnimported[anc][dec];
 				UI = ptrans[0][1]*  pemisImported[anc][dec];
@@ -2045,10 +2051,10 @@ mydouble maximum_likelihood_ClonalFrame_branch_allsites(const int dec_id, const 
 			}					
 		} else {
 			if(i<iscompat.size()-1) {
-				UU = ptrans[0][0]*subseq_ML[i+1][0];
-				UI = ptrans[0][1]*subseq_ML[i+1][1];
-				IU = ptrans[1][0]*subseq_ML[i+1][0];
-				II = ptrans[1][1]*subseq_ML[i+1][1];
+				UU = ptrans[0][0]*subseq_ML[2*(i+1)];
+				UI = ptrans[0][1]*subseq_ML[2*(i+1)+1];
+				IU = ptrans[1][0]*subseq_ML[2*(i+1)];
+				II = ptrans[1][1]*subseq_ML[2*(i+1)+1];
 			} else {
 				UU = ptrans[0][0];
 				UI = ptrans[0][1];
@@ -2056,23 +2062,23 @@ mydouble maximum_likelihood_ClonalFrame_branch_allsites(const int dec_id, const 
 				II = ptrans[1][1];
 			}					
 		}
-		subseq_ML[i][0] = (UU>=UI) ? UU : UI;
-		path_ML[i][0]   = (UU>=UI) ? Unimported : Imported;
-		subseq_ML[i][1] = (IU>=II) ? IU : II;
-		path_ML[i][1]   = (IU>=II) ? Unimported : Imported;
+		subseq_ML[2*i] = (UU>=UI) ? UU : UI;
+		path_ML[2*i]   = (UU>=UI) ? Unimported : Imported;
+		subseq_ML[2*i+1] = (IU>=II) ? IU : II;
+		path_ML[2*i+1]   = (IU>=II) ? Unimported : Imported;
 	}
 	// Beginning at the first variable site, identify the most likely path
 	// Sanity check
-	if(path_ML[0][0]!=path_ML[0][1]) {
+	if(path_ML[0]!=path_ML[1]) {
 		stringstream errTxt;
 		errTxt << "maximum_likelihood_ClonalFrame_branch_allsites(): internal inconsistency when choosing the first importation state in the best path";
 		error(errTxt.str().c_str());
 	}
-	is_imported[0] = path_ML[0][0];
-	ML = subseq_ML[0][0];
+	is_imported[0] = path_ML[0];
+	ML = subseq_ML[0];
 	for(i=1;i<iscompat.size();i++) {
 		const int prev = is_imported[i-1];
-		is_imported[i] = path_ML[i][prev];
+		is_imported[i] = path_ML[2*i+prev];
 	}
 	
 	return ML;
@@ -2342,32 +2348,43 @@ double Baum_Welch(const marginal_tree &tree, const Matrix<Nucleotide> &node_nuc,
 	const int maxit = 200;
 	const double threshold = 1.0e-2;
 	double new_ML;
-	int it;
-	for(it=0;it<maxit;it++) {
-		// Identify the model parameters
-		rho_over_theta = full_param[0];
-		mean_import_length = full_param[1];
-		import_divergence = full_param[2];
-		// Update the likelihood
-		mutI=0.0; numU=0.0; numI=0.0; nsiI=0.0; lenU=0.0; lenI=0.0;
-		new_ML = 0.;
-		double priorL_branch_it = 0.0;
+	bool em_done = false;
+	double priorL_branch_it = 0.0;
+	// Run every EM iteration inside one parallel region so the per-thread
+	// workspaces are allocated once and reused across iterations instead of
+	// being re-allocated every iteration.
+	#pragma omp parallel
+	{
+		// Allocate once per thread (reused across EM iterations)
+		Matrix<double> numEmiss_loc(2,2), numTrans_loc(2,2);
+		vector<double> denEmiss_loc(2),   denTrans_loc(2);
 
-		#pragma omp parallel
-		{
-			// Allocate once per thread
-			Matrix<double> numEmiss_loc(2,2), numTrans_loc(2,2);
-			vector<double> denEmiss_loc(2),   denTrans_loc(2);
+		// Work buffers reused across branches and EM iterations (Scheme A)
+		Matrix<mydouble> workA(position.size(),2);
+		vector<unsigned char> workObs(position.size());
+		vector<double> workGamma(2*position.size());
+		vector<double> workXi(4*((position.size()>=2)?(position.size()-1):0));
 
-			// Work buffers reused across branches and EM iterations (Scheme A)
-			Matrix<mydouble> workA(position.size(),2);
-			vector<unsigned char> workObs(position.size());
-			vector<double> workGamma(2*position.size());
-			vector<double> workXi(4*((position.size()>=2)?(position.size()-1):0));
+		// Thread-local reductions
+		double new_ML_loc=0.0, priorL_loc=0.0;
+		double mutI_loc=0.0, numU_loc=0.0, numI_loc=0.0, nsiI_loc=0.0, lenU_loc=0.0, lenI_loc=0.0;
 
-			// Thread-local reductions
-			double new_ML_loc=0.0, priorL_loc=0.0;
-			double mutI_loc=0.0, numU_loc=0.0, numI_loc=0.0, nsiI_loc=0.0, lenU_loc=0.0, lenI_loc=0.0;
+		int it;
+		for(it=0;it<maxit && !em_done;it++) {
+			// Identify the model parameters and reset the global accumulators
+			#pragma omp single
+			{
+				rho_over_theta = full_param[0];
+				mean_import_length = full_param[1];
+				import_divergence = full_param[2];
+				mutI=0.0; numU=0.0; numI=0.0; nsiI=0.0; lenU=0.0; lenI=0.0;
+				new_ML = 0.;
+				priorL_branch_it = 0.0;
+			}
+
+			// Reset thread-local reductions
+			new_ML_loc=0.0; priorL_loc=0.0;
+			mutI_loc=0.0; numU_loc=0.0; numI_loc=0.0; nsiI_loc=0.0; lenU_loc=0.0; lenI_loc=0.0;
 
 			#pragma omp for schedule(static)
 			for(i=0;i<(int)informative.size();i++) {
@@ -2420,40 +2437,47 @@ double Baum_Welch(const marginal_tree &tree, const Matrix<Nucleotide> &node_nuc,
 			numU += numU_loc;
 			#pragma omp atomic
 			lenI += lenI_loc;
-		}
 
-		// Add the non-branch prior pieces after (single-thread)
-		priorL = gamma_loglikelihood(full_param[0], prior_a[0], prior_b[0])
-			+ gamma_loglikelihood(1.0/full_param[1], prior_a[1], prior_b[1])
-			+ gamma_loglikelihood(full_param[2], prior_a[2], prior_b[2])
-			+ priorL_branch_it;
+			#pragma omp barrier
+			// Add the non-branch prior pieces and update the shared parameters (single thread)
+			#pragma omp single
+			{
+				priorL = gamma_loglikelihood(full_param[0], prior_a[0], prior_b[0])
+					+ gamma_loglikelihood(1.0/full_param[1], prior_a[1], prior_b[1])
+					+ gamma_loglikelihood(full_param[2], prior_a[2], prior_b[2])
+					+ priorL_branch_it;
 
-		new_ML += priorL;
-		++neval;
-		// Update estimates of the recombination parameters
-		full_param[0] = (prior_a[0]+numI)/(prior_b[0]+lenU);
-		full_param[1] = (prior_b[1]+lenI)/(prior_a[1]+numU);
-		full_param[2] = (prior_a[2]+mutI)/(prior_b[2]+nsiI);
-		posterior_a[0] = (prior_a[0]+numI);
-		posterior_a[1] = (prior_a[1]+numU);
-		posterior_a[2] = (prior_a[2]+mutI);
-		if(coutput) {
-			cout << "params =";
-			for(int j=0;j<full_param.size();j++) cout << " " << full_param[j];
-			cout << " ML = " << new_ML << endl;
+				new_ML += priorL;
+				++neval;
+				// Update estimates of the recombination parameters
+				full_param[0] = (prior_a[0]+numI)/(prior_b[0]+lenU);
+				full_param[1] = (prior_b[1]+lenI)/(prior_a[1]+numU);
+				full_param[2] = (prior_a[2]+mutI)/(prior_b[2]+nsiI);
+				posterior_a[0] = (prior_a[0]+numI);
+				posterior_a[1] = (prior_a[1]+numU);
+				posterior_a[2] = (prior_a[2]+mutI);
+				if(coutput) {
+					cout << "params =";
+					for(int j=0;j<full_param.size();j++) cout << " " << full_param[j];
+					cout << " ML = " << new_ML << endl;
+				}
+				// Test for no further improvement. Identical to the sequential
+				// version: ML always takes the latest value (all three branches
+				// of the original if/else-if assign ML = new_ML); only the done
+				// flag replaces the break. The fabs test reads the previous ML.
+				if(fabs(new_ML-ML) < threshold) {
+					em_done = true;
+				}
+				ML = new_ML;
+			}
+			// Implicit barrier at the end of the single block makes the shared
+			// parameters and em_done visible before the next iteration
 		}
-		// Test for no further improvement
-		if(new_ML-ML< -threshold) {
-			//cout << "Old likelihood = " << ML << " delta = " << new_ML-ML << endl;
-			//warning("Likelihood got worse in Baum_Welch");
-		} else if(fabs(new_ML-ML)<threshold) {
-			ML = new_ML;
-			break;
+		#pragma omp single
+		{
+			if(it==maxit) warning("Baum_Welch(): maximum number of iterations reached");
 		}
-		// Otherwise continue
-		ML = new_ML;
 	}
-	if(it==maxit) warning("Baum_Welch(): maximum number of iterations reached");
 	// Once more for debugging purposes
 	// mydouble_forward_backward_expectations_ClonalFrame_branch(dec_id,anc_id,node_nuc,position,ipat,kappa,pinuc,branch_length,rho_over_theta,mean_import_length,import_divergence,numEmiss,denEmiss,numTrans,denTrans);
 	if(coutput) {
